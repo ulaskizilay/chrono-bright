@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 LanguageCode = Literal["en", "tr"]
 
@@ -71,7 +71,7 @@ _TRANSLATIONS: Final[dict[LanguageCode, dict[str, str]]] = {
 def normalize_language(value: object) -> LanguageCode:
     """Return a supported language code, defaulting safely to English."""
     if isinstance(value, str) and value in SUPPORTED_LANGUAGES:
-        return cast(LanguageCode, value)
+        return value
     return DEFAULT_LANGUAGE
 
 
