@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Callable
 from datetime import datetime
+from typing import Literal
 
 from chronobright.logger import get_logger
 from chronobright.models import BrightnessScheduleConfig
-from chronobright.time_utils import is_morning_period_active
+from chronobright.time_utils import is_morning_period_active, seconds_until_next_change
 
 logger = get_logger(__name__)
 
-PeriodName = str  # "morning" | "evening"
+PeriodName = Literal["morning", "evening"]
 
 
 class ScheduleService:
@@ -32,7 +32,9 @@ class ScheduleService:
         self._on_brightness_change = on_brightness_change
         self._poll_interval_seconds = poll_interval_seconds
         self._running = threading.Event()
+        self._wakeup = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
         self._config: BrightnessScheduleConfig | None = None
         self._active_period: PeriodName | None = None
 
@@ -53,6 +55,7 @@ class ScheduleService:
     def stop(self) -> None:
         """Signal the background thread to stop and wait for it to finish."""
         self._running.clear()
+        self._wakeup.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         logger.info("Schedule service stopped.")
@@ -60,24 +63,32 @@ class ScheduleService:
     @property
     def job_count(self) -> int:
         """Number of configured schedule transitions (morning + evening)."""
-        return 2 if self._config is not None else 0
+        with self._lock:
+            return 2 if self._config is not None else 0
 
     @property
     def active_period(self) -> PeriodName | None:
         """Currently active schedule period, if a schedule is loaded."""
-        return self._active_period
+        with self._lock:
+            return self._active_period
 
     def replace_brightness_callback(self, callback: Callable[[int, str], None]) -> None:
         """Swap the brightness-change callback."""
-        self._on_brightness_change = callback
+        with self._lock:
+            self._on_brightness_change = callback
 
     def apply_schedule(self, config: BrightnessScheduleConfig) -> str:
         """Validate *config*, store it, and immediately apply the correct period.
 
+        The config is stored even if the immediate brightness call fails, so a
+        transient display error never leaves the scheduler without a schedule.
+
         Returns a human-readable status string describing the active schedule.
         """
         config.validate()
-        self._config = config
+        with self._lock:
+            self._config = config
+        self._wakeup.set()
         self._apply_immediate_brightness(config)
 
         status = (
@@ -94,32 +105,68 @@ class ScheduleService:
     def _apply_immediate_brightness(self, config: BrightnessScheduleConfig) -> None:
         """Apply whichever period is currently active without waiting for a poll tick."""
         period = self._current_period(config)
-        self._active_period = period
-        level, label = self._period_settings(config, period)
+        with self._lock:
+            self._active_period = period
+            callback = self._on_brightness_change
+        level = self._period_settings(config, period)[0]
         logger.debug("Immediate apply: %s period active.", period)
-        self._on_brightness_change(level, f"{label} (immediate)")
+        try:
+            callback(level, period)
+        except Exception:
+            logger.exception("Immediate brightness apply failed, schedule kept")
+
+    def _sleep_interval(self) -> float:
+        """Adaptive sleep: next boundary or poll interval, whichever is sooner."""
+        with self._lock:
+            cfg = self._config
+        if cfg is None:
+            return self._poll_interval_seconds
+        try:
+            adaptive = seconds_until_next_change(
+                cfg.morning_time, cfg.evening_time, datetime.now()
+            )
+        except Exception:
+            return self._poll_interval_seconds
+        # Check at least every poll interval so a 1s-configured test loop stays
+        # responsive, but sleep longer when the next change is far away.
+        # Cap each nap at 60s so manual clock changes are picked up promptly.
+        return max(self._poll_interval_seconds, min(adaptive, 60.0))
 
     def _run_loop(self) -> None:
         while self._running.is_set():
             try:
                 self._check_period_transition()
             except Exception:
-                logger.exception("Schedule loop error")
-                self._running.clear()
-            time.sleep(self._poll_interval_seconds)
+                # Never kill the scheduler on a transient error; keep polling.
+                logger.exception("Schedule loop error, continuing")
+            self._wakeup.clear()
+            # Wake early on stop() or apply_schedule(), else sleep adaptively.
+            self._wakeup.wait(timeout=self._sleep_interval())
 
     def _check_period_transition(self) -> None:
-        if self._config is None:
+        with self._lock:
+            config = self._config
+            active = self._active_period
+            callback = self._on_brightness_change
+        if config is None:
             return
 
-        period = self._current_period(self._config)
-        if period == self._active_period:
+        try:
+            period = self._current_period(config)
+        except Exception:
+            logger.exception("Failed to compute current period")
+            return
+        if period == active:
             return
 
-        self._active_period = period
-        level, label = self._period_settings(self._config, period)
+        with self._lock:
+            self._active_period = period
+        level = self._period_settings(config, period)[0]
         logger.info("Schedule period changed to %s.", period)
-        self._on_brightness_change(level, label)
+        try:
+            callback(level, period)
+        except Exception:
+            logger.exception("Scheduled brightness apply failed, keeping new period")
 
     @staticmethod
     def _current_period(config: BrightnessScheduleConfig) -> PeriodName:
@@ -129,7 +176,7 @@ class ScheduleService:
         return "evening"
 
     @staticmethod
-    def _period_settings(config: BrightnessScheduleConfig, period: PeriodName) -> tuple[int, str]:
+    def _period_settings(config: BrightnessScheduleConfig, period: PeriodName) -> tuple[int, PeriodName]:
         if period == "morning":
-            return config.morning_brightness, "Morning"
-        return config.evening_brightness, "Evening"
+            return config.morning_brightness, "morning"
+        return config.evening_brightness, "evening"

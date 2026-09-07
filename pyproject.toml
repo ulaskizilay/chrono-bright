@@ -31,6 +31,9 @@ dependencies = [
 [project.scripts]
 chronobright = "chronobright.__main__:main"
 
+[project.gui-scripts]
+chronobright-gui = "chronobright.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["chronobright*"]
