@@ -53,7 +53,7 @@ def test_apply_immediate_brightness_morning_period(
 
     service._apply_immediate_brightness(config)
 
-    callback.assert_called_once_with(90, "Morning (immediate)")
+    callback.assert_called_once_with(90, "morning")
     assert service.active_period == "morning"
 
 
@@ -73,7 +73,7 @@ def test_apply_immediate_brightness_evening_period(
 
     service._apply_immediate_brightness(config)
 
-    callback.assert_called_once_with(80, "Evening (immediate)")
+    callback.assert_called_once_with(80, "evening")
     assert service.active_period == "evening"
 
 
@@ -93,7 +93,7 @@ def test_apply_immediate_brightness_overnight_schedule(
 
     service._apply_immediate_brightness(config)
 
-    callback.assert_called_once_with(90, "Morning (immediate)")
+    callback.assert_called_once_with(90, "morning")
 
 
 @patch("chronobright.services.schedule_service.datetime")
@@ -115,7 +115,7 @@ def test_check_period_transition_fires_once_on_boundary_crossing(
     service._check_period_transition()
     service._check_period_transition()
 
-    callback.assert_called_once_with(80, "Evening")
+    callback.assert_called_once_with(80, "evening")
     assert service.active_period == "evening"
 
 
@@ -161,11 +161,45 @@ def test_start_is_noop_when_already_running(service: ScheduleService) -> None:
     service.stop()
 
 
-def test_run_loop_logs_and_stops_on_exception(service: ScheduleService) -> None:
+def test_run_loop_continues_on_exception(service: ScheduleService) -> None:
     service._running.set()
-    with patch.object(service, "_check_period_transition", side_effect=RuntimeError("boom")):
+    calls = {"count": 0}
+
+    def flaky() -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("boom")
+        service._running.clear()
+
+    with patch.object(service, "_check_period_transition", side_effect=flaky):
         service._run_loop()
-    assert not service._running.is_set()
+    assert calls["count"] >= 2
+
+
+def test_callback_exception_does_not_kill_scheduler(
+    service: ScheduleService, callback: MagicMock
+) -> None:
+    callback.side_effect = RuntimeError("display offline")
+    config = BrightnessScheduleConfig(
+        morning_time="08:00",
+        morning_brightness=90,
+        evening_time="19:00",
+        evening_brightness=80,
+    )
+    # Immediate apply must not raise; config must still be stored.
+    service.apply_schedule(config)
+    assert service.job_count == 2
+
+    service._active_period = "morning"
+    with patch(
+        "chronobright.services.schedule_service.datetime"
+    ) as mock_datetime:
+        from datetime import datetime as dt
+
+        mock_datetime.now.return_value = dt(2026, 3, 29, 19, 0)
+        service._check_period_transition()
+    # Period advanced even though the callback failed.
+    assert service.active_period == "evening"
 
 
 def test_replace_brightness_callback(service: ScheduleService) -> None:

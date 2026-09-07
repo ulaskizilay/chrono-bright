@@ -36,9 +36,11 @@ def _configure_root_logger() -> None:
     root.addHandler(console_handler)
 
     try:
-        config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_dir = config.get_log_dir()
+        log_path = config.get_log_path()
+        log_dir.mkdir(parents=True, exist_ok=True)
         file_handler = logging.handlers.RotatingFileHandler(
-            config.LOG_PATH,
+            log_path,
             maxBytes=2 * 1024 * 1024,
             backupCount=3,
             encoding="utf-8",
@@ -60,4 +62,6 @@ def _ensure_configured() -> None:
 def get_logger(name: str) -> logging.Logger:
     """Return a child logger scoped under the 'chronobright' namespace."""
     _ensure_configured()
+    if not name.startswith("chronobright"):
+        name = f"chronobright.{name}"
     return logging.getLogger(name)

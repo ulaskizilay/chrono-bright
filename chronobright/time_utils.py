@@ -45,3 +45,26 @@ def is_morning_period_active(morning_time: str, evening_time: str, now: dt_time)
         return morning <= now < evening
 
     return not (evening <= now < morning)
+
+
+def seconds_until_next_change(morning_time: str, evening_time: str, now: datetime) -> float:
+    """Return seconds from *now* until the next period boundary.
+
+    Used for adaptive sleeping so the background thread does not wake every
+    second when the next transition is hours away. Always returns at least 1
+    second and at most 15 minutes (to survive manual clock changes).
+    """
+    from datetime import timedelta
+
+    morning = parse_clock(morning_time)
+    evening = parse_clock(evening_time)
+    today = now.date()
+    deltas: list[float] = []
+    for boundary in (morning, evening):
+        candidate = datetime.combine(today, boundary)
+        if candidate <= now:
+            candidate = candidate + timedelta(days=1)
+        deltas.append((candidate - now).total_seconds())
+    if not deltas:
+        return 60.0
+    return max(1.0, min(min(deltas), 15 * 60.0))

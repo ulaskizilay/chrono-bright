@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import queue
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +22,7 @@ def app_instance():
         patch("chronobright.ui.app.SettingsService") as mock_settings_cls,
         patch("chronobright.ui.app.ScheduleService") as mock_schedule_cls,
         patch("chronobright.ui.app.TrayService") as mock_tray_cls,
+        patch("chronobright.ui.app.AutostartService") as mock_autostart_cls,
     ):
         from chronobright.ui.app import ChronoBrightApp
 
@@ -28,6 +30,7 @@ def app_instance():
         app._is_exiting = False
         app._window_in_tray = False
         app._startup_brightness = [70, 80]
+        app._ui_queue = queue.Queue()
 
         app._brightness_service = mock_brightness_cls.return_value
         app._brightness_service.get_all_brightness.return_value = [70, 80]
@@ -35,6 +38,9 @@ def app_instance():
         app._settings_service = mock_settings_cls.return_value
         app._schedule_service = mock_schedule_cls.return_value
         app._tray_service = mock_tray_cls.return_value
+        app._autostart_service = mock_autostart_cls.return_value
+        app._autostart_service.is_enabled.return_value = False
+        app._appearance = "System"
         app._translator = Translator()
         app._current_schedule_config = BrightnessScheduleConfig(
             morning_time="08:00",
@@ -53,6 +59,14 @@ def app_instance():
         app._lbl_status = MagicMock()
         app._lbl_morning_value = MagicMock()
         app._lbl_evening_value = MagicMock()
+        app._morning_frame = MagicMock()
+        app._evening_frame = MagicMock()
+        app._hero_period = MagicMock()
+        app._hero_level_label = MagicMock()
+        app._hero_bar = MagicMock()
+        app._hero_schedule = MagicMock()
+        app._hero_period_key = None
+        app._hero_level_value = None
 
         app.after = MagicMock()
         app.withdraw = MagicMock()
@@ -111,7 +125,12 @@ def test_apply_brightness_sets_level_and_status(app_instance) -> None:
     app_instance._apply_brightness(85, "Morning")
 
     app_instance._brightness_service.set_brightness.assert_called_once_with(85)
-    app_instance.after.assert_called_once()
+    # One queued refresh updates status + hero + highlight + tray together.
+    assert app_instance._ui_queue.qsize() == 1
+    app_instance._ui_queue.get_nowait()()
+    app_instance._lbl_status.configure.assert_called()
+    app_instance._hero_period.configure.assert_called()
+    app_instance._tray_service.set_active_period.assert_called_once_with("morning", 85)
 
 
 def test_apply_brightness_handles_runtime_error(app_instance) -> None:
@@ -119,7 +138,7 @@ def test_apply_brightness_handles_runtime_error(app_instance) -> None:
 
     app_instance._apply_brightness(85, "Morning")
 
-    app_instance.after.assert_called_once()
+    assert app_instance._ui_queue.qsize() == 1
 
 
 def test_on_apply_clicked_saves_and_applies(app_instance) -> None:
@@ -134,7 +153,7 @@ def test_on_apply_clicked_saves_and_applies(app_instance) -> None:
 
     app_instance._on_apply_clicked()
 
-    app_instance._settings_service.save_schedule.assert_called_once_with(config, "en")
+    app_instance._settings_service.save_schedule.assert_called_once_with(config, "en", "System")
     app_instance._schedule_service.apply_schedule.assert_called_once_with(config)
 
 
@@ -187,7 +206,7 @@ def test_hide_window_to_tray_withdraws_when_viewable(app_instance) -> None:
     app_instance.hide_window_to_tray()
 
     app_instance.withdraw.assert_called_once()
-    app_instance._tray_service.set_window_visible.assert_called_once_with(False)
+    app_instance._tray_service.refresh_menu_text.assert_called_once_with()
 
 
 def test_hide_window_to_tray_skips_when_already_in_tray(app_instance) -> None:
@@ -202,7 +221,7 @@ def test_show_window_restores_from_tray(app_instance) -> None:
     app_instance.show_window()
 
     app_instance.deiconify.assert_called_once()
-    app_instance._tray_service.set_window_visible.assert_called_once_with(True)
+    app_instance._tray_service.refresh_menu_text.assert_called_once_with()
 
 
 def test_exit_application_stops_services_and_restores(app_instance) -> None:
@@ -238,12 +257,16 @@ def test_restore_startup_brightness_single_display(app_instance) -> None:
     app_instance._brightness_service.set_brightness.assert_called_once_with(65)
 
 
-def test_tray_callbacks_schedule_on_main_thread(app_instance) -> None:
+def test_tray_callbacks_enqueue_for_main_thread(app_instance) -> None:
     app_instance._show_window_from_tray()
     app_instance._hide_window_from_tray()
     app_instance._exit_from_tray()
 
-    assert app_instance.after.call_count == 3
+    # Nothing touches Tk directly; all three run via the UI queue drain.
+    assert app_instance._ui_queue.qsize() == 3
+    app_instance._is_exiting = True  # stop drain from rescheduling via after()
+    while not app_instance._ui_queue.empty():
+        app_instance._ui_queue.get_nowait()()
 
 
 def test_on_apply_clicked_handles_oserror(app_instance) -> None:
@@ -281,10 +304,16 @@ def test_status_is_retranslated_when_language_changes(app_instance) -> None:
 def test_language_change_persists_preference_and_refreshes_ui(app_instance) -> None:
     app_instance._language_label = MagicMock()
     app_instance._header_label = MagicMock()
+    app_instance._subtitle_label = MagicMock()
+    app_instance._theme_label = MagicMock()
+    app_instance._hero_kicker = MagicMock()
     app_instance._morning_heading = MagicMock()
     app_instance._evening_heading = MagicMock()
+    app_instance._morning_time_caption = MagicMock()
+    app_instance._evening_time_caption = MagicMock()
     app_instance._btn_apply = MagicMock()
     app_instance._btn_exit = MagicMock()
+    app_instance._chk_autostart = MagicMock()
     app_instance._slider_morning.get.return_value = 90
     app_instance._slider_evening.get.return_value = 80
 
@@ -292,7 +321,7 @@ def test_language_change_persists_preference_and_refreshes_ui(app_instance) -> N
 
     assert app_instance._translator.language == "tr"
     app_instance._settings_service.save_schedule.assert_called_once_with(
-        app_instance._current_schedule_config, "tr"
+        app_instance._current_schedule_config, "tr", "System"
     )
     app_instance._tray_service.refresh_menu_text.assert_called_once_with()
 
@@ -366,11 +395,17 @@ def test_build_layout_wires_panels() -> None:
     app._on_evening_slider_moved = MagicMock()
     app._on_apply_clicked = MagicMock()
     app._on_language_changed = MagicMock()
+    app._on_appearance_changed = MagicMock()
+    app._on_autostart_toggled = MagicMock()
     app._translate = MagicMock(side_effect=lambda key, **_values: key)
     app._translator = Translator()
+    app._appearance = "System"
     app._format_status = ChronoBrightApp._format_status.__get__(app, ChronoBrightApp)
     app._set_status = ChronoBrightApp._set_status.__get__(app, ChronoBrightApp)
     app.exit_application = MagicMock()
+    app._autostart_service = MagicMock()
+    app._autostart_service.is_enabled.return_value = False
+    app._build_hero_card = MagicMock()
     app._build_morning_panel = ChronoBrightApp._build_morning_panel.__get__(app, ChronoBrightApp)
     app._build_evening_panel = ChronoBrightApp._build_evening_panel.__get__(app, ChronoBrightApp)
 
@@ -380,6 +415,8 @@ def test_build_layout_wires_panels() -> None:
     entry = MagicMock()
     slider = MagicMock()
     option_menu = MagicMock()
+    checkbox = MagicMock()
+    progress = MagicMock()
     with (
         patch.object(app_module.ctk, "CTkFont", return_value=MagicMock()),
         patch.object(app_module.ctk, "CTkLabel", return_value=label),
@@ -388,11 +425,15 @@ def test_build_layout_wires_panels() -> None:
         patch.object(app_module.ctk, "CTkEntry", return_value=entry),
         patch.object(app_module.ctk, "CTkSlider", return_value=slider),
         patch.object(app_module.ctk, "CTkOptionMenu", return_value=option_menu),
+        patch.object(app_module.ctk, "CTkCheckBox", return_value=checkbox),
+        patch.object(app_module.ctk, "CTkProgressBar", return_value=progress),
+        patch.object(app_module.ctk, "BooleanVar", return_value=MagicMock()),
     ):
         ChronoBrightApp._build_layout(app)
 
     app.grid_columnconfigure.assert_called()
     label.grid.assert_called()
+    app._build_hero_card.assert_called_once()
 
 
 def test_build_morning_panel_creates_entry_and_slider() -> None:
@@ -445,3 +486,45 @@ def test_build_evening_panel_creates_entry_and_slider() -> None:
     entry.insert.assert_called()
     slider.set.assert_called()
     slider.configure.assert_called()
+
+
+def test_show_active_state_updates_hero_and_highlight(app_instance) -> None:
+    app_instance._show_active_state("evening", 70)
+
+    assert app_instance._hero_period_key == "evening"
+    assert app_instance._hero_level_value == 70
+    app_instance._hero_period.configure.assert_called_once()
+    app_instance._hero_bar.set.assert_called_once_with(0.7)
+    app_instance._morning_frame.configure.assert_called_once_with(border_width=0)
+    app_instance._evening_frame.configure.assert_called_once_with(
+        border_width=2, border_color="#6366f1"
+    )
+    app_instance._tray_service.set_active_period.assert_called_once_with("evening", 70)
+
+
+def test_highlight_morning_panel(app_instance) -> None:
+    app_instance._highlight_active_period("morning")
+
+    app_instance._morning_frame.configure.assert_called_once()
+    app_instance._evening_frame.configure.assert_called_once_with(border_width=0)
+
+
+def test_hero_schedule_summary_uses_current_config(app_instance) -> None:
+    app_instance._update_hero_schedule()
+
+    text = app_instance._hero_schedule.configure.call_args.kwargs["text"]
+    assert "08:00" in text and "19:00" in text
+
+
+def test_populate_form_refreshes_hero_summary(app_instance) -> None:
+    config = BrightnessScheduleConfig(
+        morning_time="07:30",
+        morning_brightness=85,
+        evening_time="20:30",
+        evening_brightness=65,
+    )
+    app_instance._populate_form(config)
+
+    assert app_instance._current_schedule_config == config
+    text = app_instance._hero_schedule.configure.call_args.kwargs["text"]
+    assert "07:30" in text and "20:30" in text

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable
 
@@ -22,7 +23,8 @@ class TrayService:
         on_show_window: Callable[[], None],
         on_hide_window: Callable[[], None],
         on_exit_application: Callable[[], None],
-        translate: Callable[[str], str] | None = None,
+        translate: Callable[..., str] | None = None,
+        is_window_visible: Callable[[], bool] | None = None,
     ) -> None:
         self._on_show_window = on_show_window
         self._on_hide_window = on_hide_window
@@ -30,7 +32,10 @@ class TrayService:
         self._icon: pystray.Icon | None = None
         self._thread: threading.Thread | None = None
         self._window_visible = True
+        self._is_window_visible = is_window_visible
         self._translate = translate or Translator().translate
+        self._active_period: str | None = None
+        self._active_level: int | None = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -63,16 +68,45 @@ class TrayService:
         self._thread = None
         logger.info("Tray icon stopped.")
 
+    def _current_visibility(self) -> bool:
+        if self._is_window_visible is not None:
+            try:
+                return bool(self._is_window_visible())
+            except Exception:
+                pass
+        return self._window_visible
+
     def set_window_visible(self, is_visible: bool) -> None:
-        """Update the tray menu state to reflect current window visibility."""
+        """Mirror visibility state (kept for compatibility; provider wins)."""
         self._window_visible = is_visible
         self._update_menu()
 
+    def set_active_period(self, period: str, level: int) -> None:
+        """Update the tray tooltip to reflect the active schedule period."""
+        self._active_period = period
+        self._active_level = level
+        if self._icon is not None:
+            with contextlib.suppress(Exception):
+                self._icon.title = self._tray_title()
+
+    def _tray_title(self) -> str:
+        if self._active_period is not None and self._active_level is not None:
+            try:
+                return self._translate(
+                    "tray_status", period=self._active_period, level=self._active_level
+                )
+            except Exception:
+                pass
+        return "ChronoBright"
+
     def refresh_menu_text(self) -> None:
         """Rebuild menu labels after the application language changes."""
+        self._update_menu()
         if self._icon is None:
             return
         self._icon.menu = self._build_menu()
+        with contextlib.suppress(Exception):
+            self._icon.title = self._tray_title()
         self._update_menu()
 
     # ------------------------------------------------------------------
@@ -102,10 +136,10 @@ class TrayService:
         self._on_exit_application()
 
     def _can_show_window(self, item: pystray.MenuItem) -> bool:
-        return not self._window_visible
+        return not self._current_visibility()
 
     def _can_hide_window(self, item: pystray.MenuItem) -> bool:
-        return self._window_visible
+        return self._current_visibility()
 
     def _update_menu(self) -> None:
         if self._icon is None:

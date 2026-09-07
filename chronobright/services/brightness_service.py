@@ -50,6 +50,8 @@ class BrightnessService:
             RuntimeError: If the underlying brightness API call fails.
         """
         validate_brightness_level(level)
+        if display is not None and (not isinstance(display, int) or display < 0):
+            raise ValueError(f"Display index must be a non-negative integer: {display}")
         try:
             if display is None:
                 sbc.set_brightness(level)
@@ -60,4 +62,5 @@ class BrightnessService:
             else:
                 logger.debug("Brightness set to %d%% on display %d.", level, display)
         except Exception as exc:
-            raise RuntimeError(f"Failed to set brightness to {level}%") from exc
+            target = "all displays" if display is None else f"display {display}"
+            raise RuntimeError(f"Failed to set brightness to {level}% on {target}") from exc

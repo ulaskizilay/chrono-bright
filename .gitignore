@@ -16,8 +16,9 @@ downloads/
 *.egg
 MANIFEST
 
-# PyInstaller
+# PyInstaller (the release spec in packaging/ is tracked on purpose)
 *.spec
+!packaging/*.spec
 *.exe
 
 # Installer logs
